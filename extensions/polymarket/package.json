@@ -1,0 +1,34 @@
+{
+    "name": "@openclaw/polymarket",
+    "version": "0.1.0",
+    "type": "module",
+    "description": "Polymarket prediction markets integration for OpenClaw",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc --watch",
+        "test": "vitest",
+        "start": "node dist/cli.js start",
+        "detect": "node dist/cli.js detect",
+        "test:ws": "node dist/cli.js test"
+    },
+    "dependencies": {
+        "ws": "^8.18.0",
+        "zod": "^3.24.1"
+    },
+    "devDependencies": {
+        "openclaw": "workspace:*",
+        "@types/ws": "^8.5.13",
+        "@types/node": "^22.0.0"
+    },
+    "files": [
+        "dist"
+    ],
+    "keywords": [
+        "openclaw",
+        "polymarket",
+        "prediction-markets",
+        "trading"
+    ]
+}
