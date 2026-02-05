@@ -1,3 +1,28 @@
+## Speckit
+
+See [SPECKIT_CONSTITUTION.md](SPECKIT_CONSTITUTION.md).
+
+#### Add to a project
+
+```bash
+uvx --from git+https://github.com/github/spec-kit.git specify init --here
+```
+
+#### Commands
+
+```bash
+
+/speckit.constitution    # Establish project principles
+/speckit.specify         # Create baseline specification
+/speckit.clarify         # Ask structured questions to de-risk ambiguous areas before planning
+/speckit.plan            # Create implementation plan
+#/speckit.checklist       # Generate quality checklists to validate requirements completeness, clarity, and consistency
+/speckit.tasks           # Generate actionable tasks
+/speckit.analyze         # Cross-artifact consistency & alignment report
+/speckit.implement       # Execute implementation
+
+```
+
 # 🦞 OpenClaw — Personal AI Assistant
 
 <p align="center">
