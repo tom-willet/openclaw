@@ -14,13 +14,14 @@
         "test:ws": "node dist/cli.js test"
     },
     "dependencies": {
+        "@chainlink/data-streams-sdk": "^1.2.1",
         "ws": "^8.18.0",
         "zod": "^3.24.1"
     },
     "devDependencies": {
-        "openclaw": "workspace:*",
+        "@types/node": "^22.0.0",
         "@types/ws": "^8.5.13",
-        "@types/node": "^22.0.0"
+        "openclaw": "workspace:*"
     },
     "files": [
         "dist"

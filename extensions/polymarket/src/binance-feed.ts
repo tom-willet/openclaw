@@ -50,10 +50,21 @@ export class BinanceBTCFeed extends EventEmitter {
    */
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      let connectionTimeout: NodeJS.Timeout | null = null;
+
       try {
         this.ws = new WebSocket(this.wsUrl);
 
+        // Set connection timeout
+        connectionTimeout = setTimeout(() => {
+          if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+            this.ws.terminate();
+            reject(new Error("Connection timeout"));
+          }
+        }, 5000);
+
         this.ws.on("open", () => {
+          if (connectionTimeout) clearTimeout(connectionTimeout);
           console.log("[Binance] Connected to BTC/USDT feed");
           this.reconnectAttempts = 0;
           this.startPing();
@@ -71,17 +82,31 @@ export class BinanceBTCFeed extends EventEmitter {
         });
 
         this.ws.on("error", (error) => {
+          if (connectionTimeout) clearTimeout(connectionTimeout);
           console.error("[Binance] WebSocket error:", error.message);
-          this.emit("error", error);
+
+          // Only emit error if we're connected (not during initial connection)
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.emit("error", error);
+          } else {
+            // Reject promise if error happens during connection
+            reject(error);
+          }
         });
 
         this.ws.on("close", () => {
+          if (connectionTimeout) clearTimeout(connectionTimeout);
           console.log("[Binance] Connection closed");
           this.stopPing();
           this.emit("disconnected");
-          this.attemptReconnect();
+
+          // Only attempt reconnect if we were previously connected
+          if (this.reconnectAttempts > 0 || this.currentPrice > 0) {
+            this.attemptReconnect();
+          }
         });
       } catch (err) {
+        if (connectionTimeout) clearTimeout(connectionTimeout);
         reject(err);
       }
     });

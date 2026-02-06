@@ -125,10 +125,12 @@ async function testWebSocket(): Promise<void> {
   });
 
   ws.on("orderbook", (orderbook) => {
-    const bestBid = orderbook.bids[0]?.price || "N/A";
-    const bestAsk = orderbook.asks[0]?.price || "N/A";
+    // Handle both orderbook formats: array format and best_bid/best_ask format
+    const bestBid = orderbook.bids?.[0]?.price || orderbook.best_bid || "N/A";
+    const bestAsk = orderbook.asks?.[0]?.price || orderbook.best_ask || "N/A";
+    const marketId = orderbook.asset_id || orderbook.market || "unknown";
     console.log(
-      `[Book] ${orderbook.market.substring(0, 8)}... Bid: ${bestBid}, Ask: ${bestAsk}`,
+      `[Book] ${marketId.substring(0, 8)}... Bid: ${bestBid}, Ask: ${bestAsk}`,
     );
   });
 

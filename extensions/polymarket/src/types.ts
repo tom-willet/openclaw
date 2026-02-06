@@ -194,6 +194,7 @@ export interface SignalBreakdown {
   tradeMomentum: SignalScore;
   btcPriceMovement: SignalScore;
   priceInefficiency: SignalScore;
+  feedComparison: SignalScore; // NEW: Binance vs Chainlink comparison
   composite: SignalScore;
 }
 
@@ -206,6 +207,7 @@ export interface StrategyConfig {
     tradeMomentum: number;
     btcPriceMovement: number;
     priceInefficiency: number;
+    feedComparison: number;
   };
   // Thresholds
   minConfidenceToTrade: number; // 0-1, minimum composite confidence
@@ -220,13 +222,14 @@ export interface StrategyConfig {
 export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   weights: {
     timeDecay: 0.35, // Highest weight - most reliable edge
-    orderbookImbalance: 0.2,
-    tradeMomentum: 0.15,
-    btcPriceMovement: 0.2,
-    priceInefficiency: 0.1,
+    orderbookImbalance: 0.18,
+    tradeMomentum: 0.13,
+    btcPriceMovement: 0.18,
+    priceInefficiency: 0.08,
+    feedComparison: 0.08, // Validation signal - agreement boost / divergence filter
   },
-  minConfidenceToTrade: 0.55,
-  minScoreToTrade: 0.3,
-  timeDecayActivationMinutes: 3, // Start time decay edge in last 3 minutes
+  minConfidenceToTrade: 0.30, // TESTING: Lowered from 0.55 for more action
+  minScoreToTrade: 0.15, // TESTING: Lowered from 0.3 for more trades
+  timeDecayActivationMinutes: 8, // TESTING: Extended from 3 min to activate earlier
   kellyFraction: 0.25, // Conservative quarter Kelly
 };

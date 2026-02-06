@@ -100,10 +100,10 @@ export class PaperTrader {
   /**
    * Close all open trades at market expiry
    */
-  closeAllTrades(finalOutcome: "yes" | "no"): void {
+  closeAllTrades(finalOutcome: "yes" | "no"): PaperTrade[] {
     const openTrades = this.trades.filter((t) => t.status === "open");
 
-    if (openTrades.length === 0) return;
+    if (openTrades.length === 0) return [];
 
     console.log(
       `\n[Paper Trade] Market expired - final outcome: ${finalOutcome.toUpperCase()}`,
@@ -112,11 +112,16 @@ export class PaperTrader {
       `[Paper Trade] Closing ${openTrades.length} open position(s)...`,
     );
 
+    const closedTrades: PaperTrade[] = [];
     for (const trade of openTrades) {
       // Determine exit price based on final outcome
       const exitPrice = trade.outcome === finalOutcome ? 1.0 : 0.0;
       this.closeTrade(trade.id, exitPrice, "expired");
+      // Push after closeTrade so the trade object has exit info
+      closedTrades.push(trade);
     }
+
+    return closedTrades;
   }
 
   /**

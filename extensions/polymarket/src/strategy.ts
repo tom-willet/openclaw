@@ -9,6 +9,7 @@ import type {
 import { DEFAULT_STRATEGY_CONFIG } from "./types.js";
 import type { BTCUpdownTracker } from "./btc-tracker.js";
 import type { BinanceBTCFeed } from "./binance-feed.js";
+import type { ChainlinkBTCFeed } from "./chainlink-feed.js";
 
 /**
  * Multi-signal strategy for 15-minute BTC updown markets.
@@ -27,22 +28,40 @@ export class BTCUpdownStrategy {
   analyze(
     state: MarketState,
     tracker: BTCUpdownTracker,
-    btcFeed: BinanceBTCFeed | null,
+    chainlinkFeed: ChainlinkBTCFeed | null,
+    binanceFeed: BinanceBTCFeed | null,
   ): SignalBreakdown {
     const timeToExpiryMs = tracker.getTimeToExpiry() || 0;
     const orderbookAnalysis = tracker.getOrderbookAnalysis();
     const tradeMomentum = tracker.getTradeMomentum(60000); // Last minute
 
-    // Calculate individual signals
-    const timeDecay = this.analyzeTimeDecay(state, timeToExpiryMs, btcFeed);
+    // Select primary BTC feed (prefer Chainlink, fallback to Binance)
+    const primaryBTCFeed = chainlinkFeed?.isConnected?.()
+      ? chainlinkFeed
+      : binanceFeed;
+
+    // Calculate individual signals (use primary feed)
+    const timeDecay = this.analyzeTimeDecay(
+      state,
+      timeToExpiryMs,
+      primaryBTCFeed,
+    );
 
     const orderbookImbalance = this.analyzeOrderbook(orderbookAnalysis);
 
     const momentum = this.analyzeTradeMomentum(tradeMomentum);
 
-    const btcMovement = this.analyzeBTCMovement(btcFeed);
+    const btcMovement = this.analyzeBTCMovement(primaryBTCFeed);
 
-    const priceInefficiency = this.analyzePriceInefficiency(state, btcFeed);
+    const priceInefficiency = this.analyzePriceInefficiency(
+      state,
+      primaryBTCFeed,
+    );
+
+    const feedComparison = this.analyzeFeedComparison(
+      chainlinkFeed,
+      binanceFeed,
+    );
 
     // Calculate composite score
     const composite = this.calculateComposite(
@@ -51,6 +70,7 @@ export class BTCUpdownStrategy {
       momentum,
       btcMovement,
       priceInefficiency,
+      feedComparison,
       timeToExpiryMs,
     );
 
@@ -60,6 +80,7 @@ export class BTCUpdownStrategy {
       tradeMomentum: momentum,
       btcPriceMovement: btcMovement,
       priceInefficiency,
+      feedComparison,
       composite,
     };
   }
@@ -111,7 +132,7 @@ export class BTCUpdownStrategy {
   private analyzeTimeDecay(
     state: MarketState,
     timeToExpiryMs: number,
-    btcFeed: BinanceBTCFeed | null,
+    btcFeed: ChainlinkBTCFeed | BinanceBTCFeed | null,
   ): SignalScore {
     const minutesToExpiry = timeToExpiryMs / 60000;
     const activationMinutes = this.config.timeDecayActivationMinutes;
@@ -274,7 +295,9 @@ export class BTCUpdownStrategy {
    * Signal 4: BTC Price Movement
    * Direct correlation with BTC price action
    */
-  private analyzeBTCMovement(btcFeed: BinanceBTCFeed | null): SignalScore {
+  private analyzeBTCMovement(
+    btcFeed: ChainlinkBTCFeed | BinanceBTCFeed | null,
+  ): SignalScore {
     if (!btcFeed || !btcFeed.isConnected()) {
       return {
         score: 0,
@@ -331,7 +354,7 @@ export class BTCUpdownStrategy {
    */
   private analyzePriceInefficiency(
     state: MarketState,
-    btcFeed: BinanceBTCFeed | null,
+    btcFeed: ChainlinkBTCFeed | BinanceBTCFeed | null,
   ): SignalScore {
     if (!btcFeed || !btcFeed.isConnected()) {
       return {
@@ -392,6 +415,117 @@ export class BTCUpdownStrategy {
   }
 
   /**
+   * Analyze feed comparison signal (Chainlink vs Binance)
+   * - Agreement: boost confidence when both feeds show same direction
+   * - Divergence: skip trade if feeds disagree significantly
+   * - Lead/Lag: early entry signal if Binance leads Chainlink
+   */
+  private analyzeFeedComparison(
+    chainlinkFeed: ChainlinkBTCFeed | null,
+    binanceFeed: BinanceBTCFeed | null,
+  ): SignalScore {
+    // Require Chainlink (settlement source)
+    if (!chainlinkFeed || !chainlinkFeed.isConnected()) {
+      return {
+        score: 0,
+        confidence: 0.1,
+        reason: "Chainlink feed unavailable",
+      };
+    }
+
+    const chainlinkChange = chainlinkFeed.getWindowChange();
+    if (!chainlinkChange) {
+      return {
+        score: 0,
+        confidence: 0.1,
+        reason: "No Chainlink window data",
+      };
+    }
+
+    // No Binance = no comparison, but not a problem
+    if (!binanceFeed || !binanceFeed.isConnected()) {
+      return {
+        score: 0,
+        confidence: 0.5,
+        reason: "Binance unavailable (single feed mode)",
+      };
+    }
+
+    const binanceChange = binanceFeed.getWindowChange();
+    if (!binanceChange) {
+      return {
+        score: 0,
+        confidence: 0.3,
+        reason: "No Binance window data",
+      };
+    }
+
+    // Calculate divergence (basis points)
+    const divergenceBps =
+      Math.abs(chainlinkChange.percent - binanceChange.percent) * 10000;
+
+    // Check agreement on direction
+    const chainlinkDirection =
+      chainlinkChange.percent > 0
+        ? "up"
+        : chainlinkChange.percent < 0
+          ? "down"
+          : "flat";
+    const binanceDirection =
+      binanceChange.percent > 0
+        ? "up"
+        : binanceChange.percent < 0
+          ? "down"
+          : "flat";
+    const agreement = chainlinkDirection === binanceDirection;
+
+    // High divergence = skip trade (basis risk)
+    if (divergenceBps > 5) {
+      // > 0.05%
+      return {
+        score: 0,
+        confidence: 0.05,
+        reason: `HIGH DIVERGENCE: ${divergenceBps.toFixed(1)} bps (CL: ${(chainlinkChange.percent * 100).toFixed(4)}%, BN: ${(binanceChange.percent * 100).toFixed(4)}%)`,
+      };
+    }
+
+    // Agreement + low divergence = confidence boost
+    if (agreement && divergenceBps < 2) {
+      // < 0.02%
+      const score =
+        chainlinkDirection === "up"
+          ? 0.15
+          : chainlinkDirection === "down"
+            ? -0.15
+            : 0;
+      return {
+        score,
+        confidence: 0.8,
+        reason: `FEEDS AGREE (${chainlinkDirection.toUpperCase()}) - ${divergenceBps.toFixed(1)} bps divergence`,
+      };
+    }
+
+    // Lead/Lag detection (Binance ahead of Chainlink)
+    const leadLag = binanceChange.percent - chainlinkChange.percent;
+    if (Math.abs(leadLag) > 0.0001 && agreement) {
+      // > 0.01%
+      const score = leadLag > 0 ? 0.1 : -0.1;
+      return {
+        score,
+        confidence: 0.6,
+        reason: `Binance leads by ${(leadLag * 100).toFixed(4)}% (early signal)`,
+      };
+    }
+
+    // Neutral: feeds close but not tight agreement
+    return {
+      score: 0,
+      confidence: 0.4,
+      reason: `Feeds neutral (${divergenceBps.toFixed(1)} bps apart)`,
+    };
+  }
+
+  /**
    * Calculate composite score from all signals
    */
   private calculateComposite(
@@ -400,6 +534,7 @@ export class BTCUpdownStrategy {
     momentum: SignalScore,
     btcMovement: SignalScore,
     priceIneff: SignalScore,
+    feedComp: SignalScore,
     timeToExpiryMs: number,
   ): SignalScore {
     const { weights } = this.config;
@@ -414,12 +549,13 @@ export class BTCUpdownStrategy {
         this.config.timeDecayActivationMinutes;
       adjustedWeights.timeDecay += timeBoost * 0.2;
 
-      // Reduce other weights proportionally
-      const reduction = (timeBoost * 0.2) / 4;
+      // Reduce other weights proportionally (5 other signals)
+      const reduction = (timeBoost * 0.2) / 5;
       adjustedWeights.orderbookImbalance -= reduction;
       adjustedWeights.tradeMomentum -= reduction;
       adjustedWeights.btcPriceMovement -= reduction;
       adjustedWeights.priceInefficiency -= reduction;
+      adjustedWeights.feedComparison -= reduction;
     }
 
     // Calculate weighted score
@@ -428,7 +564,8 @@ export class BTCUpdownStrategy {
       orderbook.score * adjustedWeights.orderbookImbalance +
       momentum.score * adjustedWeights.tradeMomentum +
       btcMovement.score * adjustedWeights.btcPriceMovement +
-      priceIneff.score * adjustedWeights.priceInefficiency;
+      priceIneff.score * adjustedWeights.priceInefficiency +
+      feedComp.score * adjustedWeights.feedComparison;
 
     // Calculate weighted confidence
     const weightedConfidence =
@@ -436,7 +573,8 @@ export class BTCUpdownStrategy {
       orderbook.confidence * adjustedWeights.orderbookImbalance +
       momentum.confidence * adjustedWeights.tradeMomentum +
       btcMovement.confidence * adjustedWeights.btcPriceMovement +
-      priceIneff.confidence * adjustedWeights.priceInefficiency;
+      priceIneff.confidence * adjustedWeights.priceInefficiency +
+      feedComp.confidence * adjustedWeights.feedComparison;
 
     // Boost confidence if signals agree
     const scores = [
@@ -445,6 +583,7 @@ export class BTCUpdownStrategy {
       momentum.score,
       btcMovement.score,
       priceIneff.score,
+      feedComp.score,
     ];
     const positiveCount = scores.filter((s) => s > 0.1).length;
     const negativeCount = scores.filter((s) => s < -0.1).length;
@@ -471,6 +610,7 @@ export class BTCUpdownStrategy {
       priceIneff.score !== 0
         ? `PI:${(priceIneff.score * 100).toFixed(0)}%`
         : null,
+      feedComp.score !== 0 ? `FC:${(feedComp.score * 100).toFixed(0)}%` : null,
     ]
       .filter(Boolean)
       .join(", ");

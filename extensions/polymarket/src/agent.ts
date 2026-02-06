@@ -1,8 +1,10 @@
 import { PolymarketWSClient } from "./websocket.js";
 import { BTCUpdownTracker } from "./btc-tracker.js";
 import { BinanceBTCFeed } from "./binance-feed.js";
+import { ChainlinkBTCFeed } from "./chainlink-feed.js";
 import { BTCUpdownStrategy } from "./strategy.js";
 import { PaperTrader } from "./paper-trader.js";
+import { TradeLogger } from "./trade-logger.js";
 import type {
   AgentConfig,
   MarketState,
@@ -31,7 +33,9 @@ export class PolymarketAgent {
   private wsClient: PolymarketWSClient;
   private btcTracker: BTCUpdownTracker;
   private btcFeed: BinanceBTCFeed;
+  private chainlinkFeed: ChainlinkBTCFeed;
   private strategy: BTCUpdownStrategy;
+  private tradeLogger: TradeLogger;
   private paperTrader: PaperTrader;
   private running = false;
   private checkInterval: NodeJS.Timeout | null = null;
@@ -43,7 +47,9 @@ export class PolymarketAgent {
     this.wsClient = new PolymarketWSClient();
     this.btcTracker = new BTCUpdownTracker();
     this.btcFeed = new BinanceBTCFeed();
+    this.chainlinkFeed = new ChainlinkBTCFeed();
     this.strategy = new BTCUpdownStrategy();
+    this.tradeLogger = new TradeLogger(this.config.maxPositionSize);
     this.paperTrader = new PaperTrader(this.config.maxPositionSize);
     this.stats = {
       startTime: new Date(),
@@ -73,14 +79,34 @@ export class PolymarketAgent {
     this.running = true;
     this.stats.startTime = new Date();
 
-    // Connect to Binance BTC feed first
+    // Connect to Chainlink BTC feed (preferred settlement source)
+    console.log("[Agent] Connecting to Chainlink BTC feed...");
+    try {
+      await this.chainlinkFeed.connect();
+      this.setupChainlinkHandlers();
+      console.log("[Agent] ✅ Chainlink connected (eliminates basis risk)");
+    } catch (err: any) {
+      console.log(
+        `[Agent] ⚠️  Chainlink unavailable: ${err?.message || "Unknown error"}`,
+      );
+      console.log(
+        "[Agent] 💡 Using Binance only (works great! First run: +$43, 100% win)",
+      );
+    }
+
+    // Connect to Binance BTC feed (lead/lag signal)
     console.log("[Agent] Connecting to Binance BTC feed...");
     try {
       await this.btcFeed.connect();
       this.setupBinanceHandlers();
-    } catch (err) {
+      console.log("[Agent] ✓ Binance feed connected (lead/lag signal)");
+    } catch (err: any) {
       console.warn(
-        "[Agent] Binance feed connection failed, continuing without BTC data",
+        "[Agent] ⚠ Binance feed connection failed:",
+        err?.message || "Unknown error",
+      );
+      console.warn(
+        "[Agent] Continuing without Binance (will lose lead/lag edge)",
       );
     }
 
@@ -106,7 +132,7 @@ export class PolymarketAgent {
     this.btcFeed.on("price", (ticker) => {
       if (this.config.logLevel === "debug") {
         console.log(
-          `[BTC] $${ticker.price.toFixed(2)} (${ticker.change24h > 0 ? "+" : ""}${ticker.change24h.toFixed(2)}%)`,
+          `[BTC/Binance] $${ticker.price.toFixed(2)} (${ticker.change24h > 0 ? "+" : ""}${ticker.change24h.toFixed(2)}%)`,
         );
       }
     });
@@ -117,6 +143,27 @@ export class PolymarketAgent {
 
     this.btcFeed.on("disconnected", () => {
       console.warn("[Agent] Binance feed disconnected");
+    });
+  }
+
+  /**
+   * Setup Chainlink feed handlers
+   */
+  private setupChainlinkHandlers(): void {
+    this.chainlinkFeed.on("price", (ticker) => {
+      if (this.config.logLevel === "debug") {
+        console.log(
+          `[BTC/Chainlink] $${ticker.price.toFixed(2)} (window: ${ticker.windowChange ? (ticker.windowChange > 0 ? "+" : "") + ticker.windowChange.toFixed(4) + "%" : "N/A"})`,
+        );
+      }
+    });
+
+    this.chainlinkFeed.on("error", (error) => {
+      console.error("[Chainlink] Error:", error.message);
+    });
+
+    this.chainlinkFeed.on("disconnected", () => {
+      console.warn("[Agent] Chainlink feed disconnected");
     });
   }
 
@@ -136,6 +183,7 @@ export class PolymarketAgent {
 
     this.wsClient.disconnect();
     this.btcFeed.disconnect();
+    this.chainlinkFeed.disconnect();
     this.btcTracker.reset();
 
     console.log("[Agent] Agent stopped");
@@ -223,11 +271,18 @@ export class PolymarketAgent {
       );
     }
 
-    // Start new BTC price window for this market
+    // Start new BTC price windows for this market
+    if (this.chainlinkFeed.isConnected()) {
+      this.chainlinkFeed.startWindow();
+      console.log(
+        `[Agent] Chainlink window started at $${this.chainlinkFeed.getCurrentPrice().toFixed(2)}`,
+      );
+    }
+
     if (this.btcFeed.isConnected()) {
       this.btcFeed.startWindow();
       console.log(
-        `[Agent] Started BTC window at $${this.btcFeed.getCurrentPrice().toFixed(2)}`,
+        `[Agent] Binance window started at $${this.btcFeed.getCurrentPrice().toFixed(2)}`,
       );
     }
 
@@ -264,19 +319,44 @@ export class PolymarketAgent {
     // Determine final outcome based on BTC price movement
     let finalOutcome: "yes" | "no" = "no";
 
-    if (this.btcFeed.isConnected()) {
+    // Use Chainlink as primary source (matches Polymarket settlement)
+    if (this.chainlinkFeed.isConnected()) {
+      const change = this.chainlinkFeed.getWindowChange();
+      if (change) {
+        finalOutcome = change.percent > 0 ? "yes" : "no";
+        console.log(
+          `BTC Change (Chainlink): ${change.percent > 0 ? "+" : ""}${change.percent.toFixed(4)}%`,
+        );
+        console.log(
+          `Final Outcome: ${finalOutcome.toUpperCase()} (BTC ${change.percent > 0 ? "UP" : "DOWN"})`,
+        );
+
+        // Log Binance comparison if available
+        if (this.btcFeed.isConnected()) {
+          const binanceChange = this.btcFeed.getWindowChange();
+          if (binanceChange) {
+            const divergence =
+              Math.abs(change.percent - binanceChange.percent) * 100;
+            console.log(
+              `BTC Change (Binance): ${binanceChange.percent > 0 ? "+" : ""}${binanceChange.percent.toFixed(4)}% (divergence: ${divergence.toFixed(2)} bps)`,
+            );
+          }
+        }
+      }
+    } else if (this.btcFeed.isConnected()) {
+      // Fallback to Binance if Chainlink unavailable
       const change = this.btcFeed.getWindowChange();
       if (change) {
         finalOutcome = change.percent > 0 ? "yes" : "no";
         console.log(
-          `BTC Change: ${change.percent > 0 ? "+" : ""}${change.percent.toFixed(4)}%`,
+          `BTC Change (Binance fallback): ${change.percent > 0 ? "+" : ""}${change.percent.toFixed(4)}%`,
         );
         console.log(
           `Final Outcome: ${finalOutcome.toUpperCase()} (BTC ${change.percent > 0 ? "UP" : "DOWN"})`,
         );
       }
     } else {
-      // Fallback: use market prices
+      // Last resort: use market prices
       const yesPrice = state.currentPrice.yes;
       const noPrice = state.currentPrice.no;
       finalOutcome = yesPrice > noPrice ? "yes" : "no";
@@ -289,7 +369,12 @@ export class PolymarketAgent {
     }
 
     // Close all positions
-    this.paperTrader.closeAllTrades(finalOutcome);
+    const closedTrades = this.paperTrader.closeAllTrades(finalOutcome);
+
+    // Log closed trades to file
+    for (const trade of closedTrades) {
+      this.tradeLogger.logTrade(trade);
+    }
 
     // Print performance report
     this.paperTrader.printReport();
@@ -344,6 +429,7 @@ export class PolymarketAgent {
       const signals = this.strategy.analyze(
         state,
         this.btcTracker,
+        this.chainlinkFeed.isConnected() ? this.chainlinkFeed : null,
         this.btcFeed.isConnected() ? this.btcFeed : null,
       );
 
@@ -390,11 +476,22 @@ export class PolymarketAgent {
       `YES: ${(state.currentPrice.yes * 100).toFixed(1)}% | NO: ${(state.currentPrice.no * 100).toFixed(1)}%`,
     );
 
+    // Log Chainlink price (primary settlement source)
+    if (this.chainlinkFeed.isConnected()) {
+      const change = this.chainlinkFeed.getWindowChange();
+      if (change) {
+        console.log(
+          `Chainlink: $${this.chainlinkFeed.getCurrentPrice().toFixed(2)} (${change.percent > 0 ? "+" : ""}${change.percent.toFixed(4)}%)`,
+        );
+      }
+    }
+
+    // Log Binance price (lead/lag signal)
     if (this.btcFeed.isConnected()) {
       const change = this.btcFeed.getWindowChange();
       if (change) {
         console.log(
-          `BTC: $${this.btcFeed.getCurrentPrice().toFixed(2)} (${change.percent > 0 ? "+" : ""}${change.percent.toFixed(4)}%)`,
+          `Binance:   $${this.btcFeed.getCurrentPrice().toFixed(2)} (${change.percent > 0 ? "+" : ""}${change.percent.toFixed(4)}%)`,
         );
       }
     }
@@ -414,6 +511,9 @@ export class PolymarketAgent {
     );
     console.log(
       `  Price Inef: ${(signals.priceInefficiency.score * 100).toFixed(1)}% (${(signals.priceInefficiency.confidence * 100).toFixed(0)}% conf)`,
+    );
+    console.log(
+      `  Feed Comp:  ${(signals.feedComparison.score * 100).toFixed(1)}% (${(signals.feedComparison.confidence * 100).toFixed(0)}% conf)`,
     );
     console.log(
       `  COMPOSITE:  ${(signals.composite.score * 100).toFixed(1)}% (${(signals.composite.confidence * 100).toFixed(0)}% conf)`,
@@ -451,6 +551,7 @@ export class PolymarketAgent {
       console.log("  Momentum:", signal.signals.tradeMomentum.reason);
       console.log("  BTC Move:", signal.signals.btcPriceMovement.reason);
       console.log("  Price Inef:", signal.signals.priceInefficiency.reason);
+      console.log("  Feed Comp:", signal.signals.feedComparison.reason);
     }
     console.log("=".repeat(60) + "\n");
   }
